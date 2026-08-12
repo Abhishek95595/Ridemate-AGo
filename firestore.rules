@@ -1,0 +1,164 @@
+rules_version = '2';
+
+// Deploy with: firebase deploy --only firestore:rules
+//
+// These rules were reverse-engineered from the app's actual Firestore reads
+// and writes (see lib/services and lib/features/**/services). They lock down
+// ownership on every collection the client touches. A few flows legitimately
+// need a user to write into another user's document or another user's ride
+// (rating aggregation, seat reservation, cross-user notifications) — those
+// are allowlisted to the *specific fields* the app actually changes, not
+// opened up wholesale. Anything not explicitly listed here defaults to deny.
+//
+// KNOWN GAP: `bookings` update rules allow either party (passenger or
+// driver) to write any field once they're a participant, because the app's
+// status/payment state machine (pending -> accepted -> payment_pending ->
+// submitted_by_passenger -> verified_by_driver -> completed, plus
+// cancelled/rejected) is spread across booking_service.dart and several
+// screens without a single source of truth to mirror precisely here. Before
+// scaling up, consider moving payment verification and status transitions
+// into a Cloud Function so the client can never directly set
+// paymentStatus to "verified_by_driver" or similar trusted states.
+
+function isSignedIn() {
+  return request.auth != null;
+}
+
+function isOwner(userId) {
+  return isSignedIn() && request.auth.uid == userId;
+}
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---- users/{userId} -----------------------------------------------
+    // Doc id == uid. Read is open to any signed-in user because the app
+    // displays other users' profiles everywhere (ride cards, driver info,
+    // passenger info, chat headers). Writes are owner-only, except a
+    // narrow allowance for another user to bump averageRating/totalRatings
+    // after rating a completed ride (see rate_driver_bottom_sheet.dart).
+    match /users/{userId} {
+      allow read: if isSignedIn();
+
+      allow create: if isOwner(userId);
+
+      allow update: if (isOwner(userId)
+          && (!('uid' in resource.data) || request.resource.data.get('uid', resource.data.uid) == resource.data.uid)
+          && (!('role' in resource.data) || request.resource.data.get('role', resource.data.role) == resource.data.role))
+        || (isSignedIn()
+          && request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['averageRating', 'totalRatings']));
+
+      allow delete: if isOwner(userId);
+
+      // ---- users/{userId}/fcmTokens/{tokenId} ---------------------------
+      // Owner can create, read, update, or delete their own FCM token documents.
+      // Other users cannot read or write another user's tokens.
+      match /fcmTokens/{tokenId} {
+        allow read, create, update, delete: if isOwner(userId);
+      }
+    }
+
+    // ---- rides/{rideId} -------------------------------------------------
+    // Browsable by any signed-in user (find-a-ride search). Only the owning
+    // driver may create/delete or change ride details. Any signed-in user
+    // may adjust `availableSeats` alone, because passengers decrement it
+    // when booking and both parties restore it on cancel/reject
+    // (find_ride_screen.dart, booking_service.dart).
+    match /rides/{rideId} {
+      allow read: if isSignedIn();
+
+      allow create: if isSignedIn()
+        && request.resource.data.driverId == request.auth.uid;
+
+      allow update: if (isSignedIn() && resource.data.driverId == request.auth.uid)
+        || (isSignedIn()
+          && request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['availableSeats']));
+
+      allow delete: if isSignedIn() && resource.data.driverId == request.auth.uid;
+    }
+
+    // ---- bookings/{bookingId} -------------------------------------------
+    // Only the two participants (passenger, driver) may read or write their
+    // booking. See KNOWN GAP note above regarding field-level transitions.
+    match /bookings/{bookingId} {
+      allow read: if isSignedIn()
+        && (resource.data.passengerId == request.auth.uid
+            || resource.data.driverId == request.auth.uid);
+
+      allow create: if isSignedIn()
+        && request.resource.data.passengerId == request.auth.uid;
+
+      allow update: if isSignedIn()
+        && (resource.data.passengerId == request.auth.uid
+            || resource.data.driverId == request.auth.uid);
+
+      allow delete: if false;
+    }
+
+    // ---- driver_reviews/{bookingId} -------------------------------------
+    // Doc id is the bookingId, which makes a second review for the same
+    // booking impossible to create (rate_driver_bottom_sheet.dart already
+    // relies on this). Reviews are public read, write-once by the
+    // passenger, and never editable.
+    match /driver_reviews/{bookingId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn()
+        && request.resource.data.passengerId == request.auth.uid
+        && !exists(/databases/$(database)/documents/driver_reviews/$(bookingId));
+      allow update, delete: if false;
+    }
+
+    // ---- ratings/{ratingId} ----------------------------------------------
+    match /ratings/{ratingId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn()
+        && request.resource.data.fromUserId == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    // ---- sos_alerts/{alertId} --------------------------------------------
+    match /sos_alerts/{alertId} {
+      allow read, update: if isSignedIn()
+        && (resource.data.riderId == request.auth.uid
+            || resource.data.driverId == request.auth.uid);
+      allow create: if isSignedIn()
+        && request.resource.data.riderId == request.auth.uid;
+      allow delete: if false;
+    }
+
+    // ---- notifications/{notificationId} -----------------------------------
+    // Read/update (mark as read)/delete restricted to the recipient.
+    // Create is allowed to any signed-in user because the app writes
+    // notifications on behalf of the *other* party in a booking/ride event
+    // (e.g. the driver's client notifies the passenger). The sender field
+    // must match the caller so at least the "from" side can't be spoofed.
+    match /notifications/{notificationId} {
+      allow read, update, delete: if isSignedIn()
+        && resource.data.receiverId == request.auth.uid;
+      allow create: if isSignedIn()
+        && request.resource.data.senderId == request.auth.uid;
+    }
+
+    // ---- chats/{bookingId}/messages/{messageId} ---------------------------
+    // Only the two participants of the underlying booking can read or send
+    // messages. Messages are immutable once sent.
+    match /chats/{bookingId}/messages/{messageId} {
+      function isBookingParticipant() {
+        let booking = get(/databases/$(database)/documents/bookings/$(bookingId)).data;
+        return request.auth.uid == booking.passengerId || request.auth.uid == booking.driverId;
+      }
+
+      allow read: if isSignedIn() && isBookingParticipant();
+      allow create: if isSignedIn() && isBookingParticipant()
+        && request.resource.data.senderId == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    // Deny everything else by default.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

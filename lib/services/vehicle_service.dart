@@ -1,0 +1,60 @@
+class VehicleService {
+  static final List<String> carModels = [
+    'Maruti Suzuki Swift',
+    'Maruti Suzuki Baleno',
+    'Maruti Suzuki WagonR',
+    'Maruti Suzuki Vitara Brezza',
+    'Maruti Suzuki Dzire',
+    'Maruti Suzuki Ertiga',
+    'Hyundai i20',
+    'Hyundai Creta',
+    'Hyundai Verna',
+    'Hyundai Venue',
+    'Hyundai Alcazar',
+    'Hyundai Tucson',
+    'Tata Nexon',
+    'Tata Tiago',
+    'Tata Harrier',
+    'Tata Safari',
+    'Tata Altroz',
+    'Tata Punch',
+    'Mahindra XUV700',
+    'Mahindra Scorpio-N',
+    'Mahindra Thar',
+    'Mahindra Bolero',
+    'Mahindra XUV300',
+    'Kia Seltos',
+    'Kia Sonet',
+    'Kia Carens',
+    'Kia Carnival',
+    'Toyota Fortuner',
+    'Toyota Innova Crysta',
+    'Toyota Urban Cruiser Hyryder',
+    'Toyota Glanza',
+    'Honda City',
+    'Honda Amaze',
+    'Honda Elevate',
+    'MG Hector',
+    'MG Astor',
+    'MG ZS EV',
+    'Skoda Kushaq',
+    'Skoda Slavia',
+    'Skoda Superb',
+    'Volkswagen Taigun',
+    'Volkswagen Virtus',
+    'Volkswagen Tiguan',
+    'Renault Kwid',
+    'Renault Kiger',
+    'Renault Triber',
+    'Nissan Magnite',
+    'Jeep Compass',
+    'Jeep Meridian',
+  ];
+
+  static List<String> getSuggestions(String query) {
+    if (query.isEmpty) return [];
+    return carModels
+        .where((model) => model.toLowerCase().contains(query.toLowerCase()))
+        .toList();
+  }
+}
